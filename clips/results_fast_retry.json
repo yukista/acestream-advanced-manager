@@ -1,0 +1,102 @@
+{
+  "summary": {
+    "total": 12,
+    "ok": 3,
+    "failed": 9,
+    "avg_ok_s": 7.79,
+    "avg_fail_s": 4.28,
+    "max_fail_s": 5.81
+  },
+  "results": [
+    {
+      "hash": "c9321006921967d6258df6945f1d598a5c0cbf1e",
+      "status": 502,
+      "elapsed_s": 5.81,
+      "error": "Direct stream URL resolution timed out"
+    },
+    {
+      "hash": "dda5d2cace9bc4cb0918e62bc50d657d4a10496a",
+      "status": 200,
+      "elapsed_s": 8.67,
+      "connect_time_ms": 397,
+      "resolution": {
+        "width": 1920,
+        "height": 1080,
+        "label": "1920x1080"
+      },
+      "video_url": "http://127.0.0.1:8000/clips/fc35d30ca3fb43c7ac3eeff0194bb54f"
+    },
+    {
+      "hash": "af458073c3096293a4dea9f369d4f308e7125bd6",
+      "status": 502,
+      "elapsed_s": 1.67,
+      "error": "Stream is not readable (HTTP 500)"
+    },
+    {
+      "hash": "4b528d10eaad747ddf52251206177573ee3e9f74",
+      "status": 502,
+      "elapsed_s": 5.61,
+      "error": "Direct stream URL resolution timed out"
+    },
+    {
+      "hash": "d4fa689e575f7626c8b136c9ad8685b945d3cccf",
+      "status": 502,
+      "elapsed_s": 5.7,
+      "error": "Direct stream URL resolution timed out"
+    },
+    {
+      "hash": "0febfb5cac3384f487d55c559bbfc877db2d0357",
+      "status": 502,
+      "elapsed_s": 1.4,
+      "error": "Stream is not readable (HTTP 500)"
+    },
+    {
+      "hash": "1bc437bce57b4b0450f6d1f8d818b7e97000745e",
+      "status": 502,
+      "elapsed_s": 5.33,
+      "error": "Direct stream URL resolution timed out"
+    },
+    {
+      "hash": "f31a586422c9244196c810c84b6c85da350318a5",
+      "status": 502,
+      "elapsed_s": 5.69,
+      "error": "Direct stream URL resolution timed out"
+    },
+    {
+      "hash": "31c19ffb3472c289c5bbbbc174449c8ed0d19e38",
+      "status": 200,
+      "elapsed_s": 8.64,
+      "connect_time_ms": 389,
+      "resolution": {
+        "width": 1920,
+        "height": 1080,
+        "label": "1920x1080"
+      },
+      "video_url": "http://127.0.0.1:8000/clips/6206796456bc4396b56be21ae5cb4ce1"
+    },
+    {
+      "hash": "d65257bb934b73647374224fd62d836815804be2",
+      "status": 200,
+      "elapsed_s": 6.07,
+      "connect_time_ms": 168,
+      "resolution": {
+        "width": 1920,
+        "height": 1080,
+        "label": "1920x1080"
+      },
+      "video_url": "http://127.0.0.1:8000/clips/2358bc461b0e42d18f65d80d17967402"
+    },
+    {
+      "hash": "fd53cfa7055fe458d4f5c0ff59a06cd43723be55",
+      "status": 502,
+      "elapsed_s": 5.72,
+      "error": "Direct stream URL resolution timed out"
+    },
+    {
+      "hash": "b08e158ea3f5c72084f5ff8e3c30ca2e4d1ff6d1",
+      "status": 502,
+      "elapsed_s": 1.6,
+      "error": "Stream is not readable (HTTP 500)"
+    }
+  ]
+}

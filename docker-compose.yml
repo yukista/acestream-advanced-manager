@@ -1,0 +1,146 @@
+version: "3.9"
+
+services:
+  # ── Existing health-checker ─────────────────────────────────────────────────
+  health-checker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: acestream-health-checker
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+
+  health-checker-2:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: acestream-health-checker-2
+    restart: unless-stopped
+
+  health-checker-3:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: acestream-health-checker-3
+    restart: unless-stopped
+
+  health-checker-4:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: acestream-health-checker-4
+    restart: unless-stopped
+
+  health-checker-5:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: acestream-health-checker-5
+    restart: unless-stopped
+
+  health-checker-6:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: acestream-health-checker-6
+    restart: unless-stopped
+
+  health-checker-7:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: acestream-health-checker-7
+    restart: unless-stopped
+
+  health-checker-8:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: acestream-health-checker-8
+    restart: unless-stopped
+
+  # ── MariaDB ─────────────────────────────────────────────────────────────────
+  mariadb:
+    image: mariadb:11
+    container_name: acestream-mariadb
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpassword
+      MYSQL_DATABASE: acestream
+      MYSQL_USER: acestream
+      MYSQL_PASSWORD: acestream
+    volumes:
+      - mariadb_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--su-mysql", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # ── Backend ─────────────────────────────────────────────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: acestream-backend
+    restart: unless-stopped
+    ports:
+      - "8001:8001"
+    environment:
+      - DATABASE_URL=mysql+pymysql://acestream:acestream@mariadb/acestream
+      - HEALTH_CHECKER_URLS=http://health-checker:8000,http://health-checker-2:8000,http://health-checker-3:8000,http://health-checker-4:8000,http://health-checker-5:8000,http://health-checker-6:8000,http://health-checker-7:8000,http://health-checker-8:8000
+      - CHECKER_INSTANCES=1
+      - ACESTREAM_ENGINE_URL=http://127.0.0.1:6878
+      - SEGMENTS_DIR=/segments
+      - HEALTH_CHECK_INTERVAL=60
+      - HEALTH_PROBE_TIMEOUT_SECONDS=35
+      - HEALTH_CHANNEL_GAP_SECONDS=2
+      - CHECKS_ENABLED=true
+      - MAX_SEGMENTS=30
+      - HLS_SEGMENT_TIME=6
+    volumes:
+      - segments_data:/segments
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      health-checker:
+        condition: service_started
+      health-checker-2:
+        condition: service_started
+      health-checker-3:
+        condition: service_started
+      health-checker-4:
+        condition: service_started
+      health-checker-5:
+        condition: service_started
+      health-checker-6:
+        condition: service_started
+      health-checker-7:
+        condition: service_started
+      health-checker-8:
+        condition: service_started
+
+  # ── Frontend ────────────────────────────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: acestream-frontend
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+      - health-checker
+      - health-checker-2
+      - health-checker-3
+      - health-checker-4
+      - health-checker-5
+      - health-checker-6
+      - health-checker-7
+      - health-checker-8
+
+volumes:
+  mariadb_data:
+  segments_data:

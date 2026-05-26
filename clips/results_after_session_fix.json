@@ -1,0 +1,102 @@
+{
+  "summary": {
+    "total": 12,
+    "ok": 3,
+    "failed": 9,
+    "avg_ok_s": 11.15,
+    "avg_fail_s": 11.86,
+    "max_fail_s": 17.01
+  },
+  "results": [
+    {
+      "hash": "c9321006921967d6258df6945f1d598a5c0cbf1e",
+      "status": 502,
+      "elapsed_s": 16.8,
+      "error": "Stream is not readable (HTTP 403)"
+    },
+    {
+      "hash": "dda5d2cace9bc4cb0918e62bc50d657d4a10496a",
+      "status": 502,
+      "elapsed_s": 2.26,
+      "error": "Stream is not readable (HTTP 403)"
+    },
+    {
+      "hash": "af458073c3096293a4dea9f369d4f308e7125bd6",
+      "status": 502,
+      "elapsed_s": 1.9,
+      "error": "Stream is not readable (HTTP 403)"
+    },
+    {
+      "hash": "4b528d10eaad747ddf52251206177573ee3e9f74",
+      "status": 502,
+      "elapsed_s": 16.71,
+      "error": "Stream is not readable (HTTP 403)"
+    },
+    {
+      "hash": "d4fa689e575f7626c8b136c9ad8685b945d3cccf",
+      "status": 502,
+      "elapsed_s": 17.01,
+      "error": "Stream is not readable (HTTP 403)"
+    },
+    {
+      "hash": "0febfb5cac3384f487d55c559bbfc877db2d0357",
+      "status": 502,
+      "elapsed_s": 1.8,
+      "error": "Stream is not readable (HTTP 403)"
+    },
+    {
+      "hash": "1bc437bce57b4b0450f6d1f8d818b7e97000745e",
+      "status": 502,
+      "elapsed_s": 16.91,
+      "error": "Stream is not readable (HTTP 403)"
+    },
+    {
+      "hash": "f31a586422c9244196c810c84b6c85da350318a5",
+      "status": 502,
+      "elapsed_s": 16.67,
+      "error": "Stream is not readable (HTTP 403)"
+    },
+    {
+      "hash": "31c19ffb3472c289c5bbbbc174449c8ed0d19e38",
+      "status": 200,
+      "elapsed_s": 13.12,
+      "connect_time_ms": 150,
+      "resolution": {
+        "width": 1920,
+        "height": 1080,
+        "label": "1920x1080"
+      },
+      "video_url": "http://127.0.0.1:8000/clips/ba0730bbccdf4822836a46e635c7b14e"
+    },
+    {
+      "hash": "d65257bb934b73647374224fd62d836815804be2",
+      "status": 200,
+      "elapsed_s": 3.29,
+      "connect_time_ms": 146,
+      "resolution": {
+        "width": 1920,
+        "height": 1080,
+        "label": "1920x1080"
+      },
+      "video_url": "http://127.0.0.1:8000/clips/41d48b4b10e24cb5ba48149906bd7964"
+    },
+    {
+      "hash": "fd53cfa7055fe458d4f5c0ff59a06cd43723be55",
+      "status": 502,
+      "elapsed_s": 16.67,
+      "error": "Stream is not readable (HTTP 403)"
+    },
+    {
+      "hash": "b08e158ea3f5c72084f5ff8e3c30ca2e4d1ff6d1",
+      "status": 200,
+      "elapsed_s": 17.05,
+      "connect_time_ms": 513,
+      "resolution": {
+        "width": 1280,
+        "height": 720,
+        "label": "1280x720"
+      },
+      "video_url": "http://127.0.0.1:8000/clips/0bc0bdd4fbcf4f11ba04e2e42f403c0d"
+    }
+  ]
+}
