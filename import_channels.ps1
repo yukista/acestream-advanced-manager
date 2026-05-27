@@ -1,81 +1,90 @@
-# Script per importar canals des del JSON de ClashSports
+param(
+    [string]$SourceFile = "clashsports.json",
+    [string]$BackendBaseUrl = "http://127.0.0.1:8001",
+    [int]$DelayMs = 50
+)
 
-$json = @'
-{"name":"  ClashSports [GH]⚽️🚲🏀🎾🏎🏁",
- "author":"Colás - Actualizado 21/02/2026 10:30",
- "url":"https://raw.githubusercontent.com/ClashUnico/Wise/refs/heads/main/Clashsports.w3u",
- "image":"https://cdn.pixabay.com/photo/2016/01/20/10/46/soccer-1151288_1280.jpg",
- "imageScale":"",
- "contact":"",
- "info":"",
- "groups":[
-      {"logo":"♦️♦️♦️♦️♦️♦️♦️♦️♦️♦️♦️♦️♦️♦️♦️♦️♦️♦️♦️♦️♦️♦️♦️♦️♦️♦️♦️♦️♦️♦️♦️♦️♦️♦️♦️♦️♦️♦️♦️♦️♦️♦️♦️♦️♦️♦️♦️♦️♦️♦️♦️♦️♦️♦️♦️♦️♦️",
-         "name":"Acestream🇪🇸",
-         "info":"Deoprtes Acestream",
-         "image":"https://droix.net/blogs/wp-content/uploads/2021/09/AceStream-1024x1024-1.png",
-         "stations":[
-            {"name":"Movistar Plus+","info":"New Era [FHD]","image":"https://images.seeklogo.com/logo-png/42/1/movistar-plus-logo-png_seeklogo-426538.png","url":"acestream://8c67cdb5ba81976662c3a67984a9545d9cfb0f70","isHost":false},
-            {"name":"Movistar Plus+","info":"New Era [FHD]","image":"https://images.seeklogo.com/logo-png/42/1/movistar-plus-logo-png_seeklogo-426538.png","url":"acestream://b6ffbbc72a5b6b579faf79ebac229af7a25b933b","isHost":false},
-            {"name":"Movistar Plus+","info":"Elcano [FHD]","image":"https://images.seeklogo.com/logo-png/42/1/movistar-plus-logo-png_seeklogo-426538.png","url":"acestream://d23497596720b47b096ec0f850d6d26a19d1a336","isHost":false},
-            {"name":"Movistar Plus+","info":"Elcano [FHD]","image":"https://images.seeklogo.com/logo-png/42/1/movistar-plus-logo-png_seeklogo-426538.png","url":"acestream://1ab443f5b4beb6d586f19e8b25b9f9646cf2ab78","isHost":false},
-            {"name":"DAZN LaLiga","info":"New Era","image":"https://telegra.ph/file/083da39b90492923b30d4.jpg","url":"acestream://19f28f60c908f987b1a03da078e63320d7bf29e8","isHost":false},
-            {"name":"DAZN LaLiga","info":"New Era [FHD]","image":"https://telegra.ph/file/083da39b90492923b30d4.jpg","url":"acestream://d1596a3988b84a4d2711fd380eb8a53256ad74ae","isHost":false},
-            {"name":"DAZN LaLiga","info":"Sport TV","image":"https://telegra.ph/file/083da39b90492923b30d4.jpg","url":"acestream://dda5d2cace9bc4cb0918e62bc50d657d4a10496a","isHost":false},
-            {"name":"M+ LaLiga","info":"New Era [FHD]","image":"https://telegra.ph/file/ede750e0a9de6e726a3f7.jpg","url":"acestream://af458073c3096293a4dea9f369d4f308e7125bd6","isHost":false},
-            {"name":"M+ LaLiga","info":"New Era II [FHD]","image":"https://telegra.ph/file/ede750e0a9de6e726a3f7.jpg","url":"acestream://d4ff041287a43e3114d411d671c4b4e92e21f33y","isHost":false},
-            {"name":"M+ LaLiga","info":"Sport TV","image":"https://telegra.ph/file/ede750e0a9de6e726a3f7.jpg","url":"acestream://31c19ffb3472c289c5bbbbc174449c8ed0d19e38","isHost":false}
-         ]}
-   ]}
-'@
+if (-not (Test-Path $SourceFile)) {
+    Write-Error "Source file not found: $SourceFile"
+    exit 1
+}
 
-$data = $json | ConvertFrom-Json
+$raw = Get-Content $SourceFile -Raw
+$data = $raw | ConvertFrom-Json
 
-$channels = @()
-$channelSet = [System.Collections.Generic.HashSet[string]]::new()
+$channels = [System.Collections.Generic.List[object]]::new()
+$seen = [System.Collections.Generic.HashSet[string]]::new()
+$invalid = 0
 
 foreach ($group in $data.groups) {
-    if ($group.stations) {
-        foreach ($station in $group.stations) {
-            if ($station.url -match "acestream://(.+)") {
-                $hash = $matches[1]
-                if ($hash -and $hash.length -eq 40 -and $channelSet.Add($hash)) {
-                    $title = "$($station.name) - $($station.info)"
-                    $channels += @{ title = $title; hash = $hash }
-                }
-            }
+    if (-not $group.stations) {
+        continue
+    }
+
+    foreach ($station in $group.stations) {
+        if (-not $station.url -or -not ($station.url -like "acestream://*")) {
+            continue
+        }
+
+        $hash = $station.url.Replace("acestream://", "").ToLower()
+
+        if (-not ($hash -match "^[a-f0-9]{40}$")) {
+            $invalid++
+            continue
+        }
+
+        if ($seen.Add($hash)) {
+            $title = "$($station.name) [$($station.info)]"
+            $channels.Add(@{ title = $title; hash = $hash })
         }
     }
 }
 
-Write-Host "Total canals únics a afegir: $($channels.Count)" -ForegroundColor Green
+Write-Host ""
+Write-Host "Prepared channels: $($channels.Count)" -ForegroundColor Green
+Write-Host "Invalid hashes skipped: $invalid" -ForegroundColor Yellow
+Write-Host ""
 
-$baseURL = "http://127.0.0.1:8001"
-$successCount = 0
-$failCount = 0
+$added = 0
+$duplicates = 0
+$errors = 0
+$target = "$($BackendBaseUrl.TrimEnd('/'))/channels"
 
 foreach ($ch in $channels) {
     try {
-        $body = @{
-            title = $ch.title
-            hash = $ch.hash
-        } | ConvertTo-Json
+        $body = @{ title = $ch.title; hash = $ch.hash } | ConvertTo-Json -Compress
 
-        $response = Invoke-RestMethod -Uri "$baseURL/api/channels" `
+        Invoke-RestMethod -Uri $target `
             -Method POST `
             -ContentType "application/json" `
             -Body $body `
-            -ErrorAction Stop
+            -ErrorAction Stop | Out-Null
 
-        Write-Host "✓ $($ch.hash.Substring(0,8))... - $($ch.title)" -ForegroundColor Green
-        $successCount++
+        $added++
     }
     catch {
-        Write-Host "✗ Failed: $($ch.hash.Substring(0,8))... - $($_.Exception.Message)" -ForegroundColor Red
-        $failCount++
+        $code = $null
+        if ($_.Exception.Response -and $_.Exception.Response.StatusCode) {
+            $code = [int]$_.Exception.Response.StatusCode
+        }
+
+        if ($code -eq 409) {
+            $duplicates++
+        }
+        else {
+            $errors++
+            Write-Host "Request failed for $($ch.hash.Substring(0, 8)) (HTTP $code)" -ForegroundColor Red
+        }
     }
-    
-    Start-Sleep -Milliseconds 100
+
+    if ($DelayMs -gt 0) {
+        Start-Sleep -Milliseconds $DelayMs
+    }
 }
 
-Write-Host "`n✓ Afegits: $successCount" -ForegroundColor Green
-Write-Host "✗ Fallats: $failCount" -ForegroundColor Red
+Write-Host ""
+Write-Host "Import summary" -ForegroundColor Cyan
+Write-Host "  Added: $added" -ForegroundColor Green
+Write-Host "  Duplicates: $duplicates" -ForegroundColor Yellow
+Write-Host "  Errors: $errors" -ForegroundColor Red
+Write-Host ""
