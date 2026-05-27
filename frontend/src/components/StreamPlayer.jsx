@@ -22,7 +22,15 @@ function getBufferedAheadSeconds(video) {
   return containingRangeAhead > 0 ? containingRangeAhead : longestRange
 }
 
-export default function StreamPlayer({ src, channelName, initialBufferSeconds = 20, onStop }) {
+export default function StreamPlayer({
+  src,
+  channelName,
+  initialBufferSeconds = 20,
+  isSwitching = false,
+  switchMessage = null,
+  switchError = null,
+  onStop,
+}) {
   const videoRef = useRef(null)
   const hlsRef = useRef(null)
   const retryTimerRef = useRef(null)
@@ -148,7 +156,7 @@ export default function StreamPlayer({ src, channelName, initialBufferSeconds = 
     }
   }, [src, initialBufferSeconds])
 
-  if (!src) {
+  if (!src && !isSwitching && !switchError) {
     return (
       <div className="player-wrap">
         <div className="player-empty">
@@ -162,7 +170,18 @@ export default function StreamPlayer({ src, channelName, initialBufferSeconds = 
   return (
     <>
       <div className="player-wrap">
-        <video ref={videoRef} controls playsInline />
+        {src && <video ref={videoRef} controls playsInline />}
+        {(isSwitching || switchError) && (
+          <div className={`player-status-overlay${switchError ? ' error' : ''}`}>
+            <div className="player-status-card">
+              {isSwitching ? <span className="spinner player-status-spinner" /> : <span className="player-status-icon">⚠️</span>}
+              <div className="player-status-text">
+                <strong>{isSwitching ? 'Canviant de canal...' : 'No s\'ha pogut carregar el canal'}</strong>
+                <span>{switchError ?? switchMessage ?? 'Esperant el vídeo...'}</span>
+              </div>
+            </div>
+          </div>
+        )}
         {isBuffering && (
           <div className="player-buffering">
             <div>Buffering...</div>

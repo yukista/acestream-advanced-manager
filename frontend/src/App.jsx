@@ -6,6 +6,7 @@ import ChannelManager from './components/ChannelManager'
 import ConfigPanel from './components/ConfigPanel'
 
 const API = '/api'
+const STREAM_SWITCH_TIMEOUT_MS = 20000
 
 function formatTs(ts) {
   if (!ts) return '—'
@@ -36,6 +37,9 @@ export default function App() {
   const [sseConnected, setSseConnected] = useState(false)
   const [tab, setTab] = useState('live')
   const [error, setError] = useState(null)
+  const [switchPending, setSwitchPending] = useState(false)
+  const [switchError, setSwitchError] = useState(null)
+  const [switchTargetId, setSwitchTargetId] = useState(null)
   const [nowTs, setNowTs] = useState(Math.floor(Date.now() / 1000))
   const sseRef = useRef(null)
 
@@ -170,11 +174,15 @@ export default function App() {
       es.addEventListener('stream_changed', (e) => {
         const { channel_id, started_at } = JSON.parse(e.data)
         setStream({ active: true, channel_id, started_at })
+        setSwitchPending(false)
+        setSwitchError(null)
+        setSwitchTargetId(null)
         setTab('live')
       })
 
       es.addEventListener('stream_stopped', () => {
         setStream(null)
+        setSwitchPending(false)
       })
 
       es.addEventListener('health_check_status', (e) => {
@@ -226,17 +234,46 @@ export default function App() {
   const handleWatchChannel = async (channelId) => {
     setError(null)
     setTab('live')
-    const res = await fetch(`${API}/stream/switch/${channelId}`, { method: 'POST' })
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}))
-      setError(err.detail ?? 'Error canviant canal')
+    setSwitchPending(true)
+    setSwitchError(null)
+    setSwitchTargetId(channelId)
+
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => controller.abort(), STREAM_SWITCH_TIMEOUT_MS)
+
+    try {
+      const res = await fetch(`${API}/stream/switch/${channelId}`, {
+        method: 'POST',
+        signal: controller.signal,
+      })
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        const message = err.detail ?? 'Error canviant canal'
+        setSwitchPending(false)
+        setSwitchError(message)
+        setError(message)
+        setTimeout(() => setError(null), 5000)
+      }
+    } catch (e) {
+      const timeout = e?.name === 'AbortError'
+      const message = timeout
+        ? 'Temps d\'espera esgotat canviant de canal. Torna-ho a provar en uns segons.'
+        : 'No s\'ha pogut canviar de canal per un error de xarxa.'
+      setSwitchPending(false)
+      setSwitchError(message)
+      setError(message)
       setTimeout(() => setError(null), 5000)
+    } finally {
+      clearTimeout(timeoutId)
     }
     // stream_changed SSE event will update the state
   }
 
   const handleStopStream = async () => {
     await fetch(`${API}/stream`, { method: 'DELETE' })
+    setSwitchPending(false)
+    setSwitchTargetId(null)
     // stream_stopped SSE event will update the state
   }
 
@@ -308,6 +345,10 @@ export default function App() {
   // ── Derived ───────────────────────────────────────────────────────────────
   const activeChannelId = stream?.channel_id ?? null
   const activeChannel = activeChannelId ? channelMap[activeChannelId] : null
+  const switchTargetChannel = switchTargetId ? channelMap[switchTargetId] : null
+  const switchMessage = switchPending
+    ? `Canviant a ${switchTargetChannel?.title ?? `canal ${switchTargetId ?? ''}`}...`
+    : null
   const streamVersion = stream?.started_at ?? stream?.channel_id ?? '0'
   const streamSrc = stream?.active
     ? `${API}/stream/playlist.m3u8?v=${encodeURIComponent(streamVersion)}`
@@ -383,6 +424,9 @@ export default function App() {
                 src={streamSrc}
                 channelName={activeChannel?.title}
                 initialBufferSeconds={settings?.values?.stream_switch_buffer_seconds ?? 20}
+                isSwitching={switchPending}
+                switchMessage={switchMessage}
+                switchError={switchError}
                 onStop={handleStopStream}
               />
               {!stream && channels.length > 0 && (
