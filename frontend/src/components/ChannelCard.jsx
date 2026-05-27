@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 
 const STATUS_ICON = { ok: '✅', error: '🔴', unknown: '⏳' }
 const STATUS_LABEL = { ok: 'Actiu', error: 'Error', unknown: 'Comprovant…' }
@@ -7,12 +8,15 @@ const STATUS_PH_ICON = { ok: '🎬', error: '⚠️', unknown: '🔄' }
 export default function ChannelCard({ channel, isActive, onWatch, onCheck }) {
   const videoRef = useRef(null)
   const modalVideoRef = useRef(null)
+  const cacheBusterRef = useRef(Date.now())
   const [playingInline, setPlayingInline] = useState(false)
   const [viewerOpen, setViewerOpen] = useState(false)
   const [viewerMode, setViewerMode] = useState('snapshot')
+  const [viewerSnapshotSrc, setViewerSnapshotSrc] = useState('')
+  const [viewerClipSrc, setViewerClipSrc] = useState('')
 
   const hasClip = channel.status === 'ok' && (channel.clip_id || channel.clip_url)
-  const cacheBuster = channel.last_checked ?? Date.now()
+  const cacheBuster = channel.last_checked ?? cacheBusterRef.current
 
   const snapshotSrc = useMemo(
     () => (hasClip ? `/api/channels/${channel.id}/snapshot?t=${cacheBuster}` : ''),
@@ -24,8 +28,11 @@ export default function ChannelCard({ channel, isActive, onWatch, onCheck }) {
   )
 
   useEffect(() => {
+    cacheBusterRef.current = Date.now()
     setPlayingInline(false)
     setViewerMode('snapshot')
+    setViewerSnapshotSrc('')
+    setViewerClipSrc('')
   }, [channel.id, channel.last_checked, channel.clip_id, channel.clip_url])
 
   useEffect(() => {
@@ -41,6 +48,8 @@ export default function ChannelCard({ channel, isActive, onWatch, onCheck }) {
   }, [viewerOpen, viewerMode, clipSrc])
 
   const openViewer = (mode) => {
+    setViewerSnapshotSrc(snapshotSrc)
+    setViewerClipSrc(clipSrc)
     setViewerMode(mode)
     setViewerOpen(true)
   }
@@ -48,6 +57,8 @@ export default function ChannelCard({ channel, isActive, onWatch, onCheck }) {
   const closeViewer = () => {
     setViewerOpen(false)
     setViewerMode('snapshot')
+    setViewerSnapshotSrc('')
+    setViewerClipSrc('')
   }
 
   const handleInlinePlay = () => {
@@ -72,6 +83,42 @@ export default function ChannelCard({ channel, isActive, onWatch, onCheck }) {
     }
     setViewerMode('snapshot')
   }
+
+  const viewerModal =
+    viewerOpen && typeof document !== 'undefined'
+      ? createPortal(
+          <div className="preview-modal" onClick={closeViewer}>
+            <div className="preview-modal-content" onClick={(e) => e.stopPropagation()}>
+              <div className="preview-modal-head">
+                <strong>{channel.title}</strong>
+                <div className="preview-modal-actions">
+                  <button className="btn-check" onClick={() => setViewerMode('snapshot')}>Captura</button>
+                  <button className="btn-check" onClick={() => setViewerMode('video')}>Clip</button>
+                  <button className="btn-check" onClick={closeViewer}>Tancar</button>
+                </div>
+              </div>
+              <div className="preview-modal-body">
+                {viewerMode === 'video' ? (
+                  <video
+                    ref={modalVideoRef}
+                    className="preview-modal-media"
+                    src={viewerClipSrc || clipSrc}
+                    controls
+                    playsInline
+                    preload="metadata"
+                    autoPlay
+                    onEnded={handleModalVideoEnd}
+                    onError={handleModalVideoEnd}
+                  />
+                ) : (
+                  <img className="preview-modal-media" src={viewerSnapshotSrc || snapshotSrc} alt={`Captura gran de ${channel.title}`} />
+                )}
+              </div>
+            </div>
+          </div>,
+          document.body,
+        )
+      : null
 
   return (
     <div className={`channel-card${isActive ? ' active-ch' : ''}`}>
@@ -157,37 +204,7 @@ export default function ChannelCard({ channel, isActive, onWatch, onCheck }) {
         )}
       </div>
 
-      {viewerOpen && (
-        <div className="preview-modal" onClick={closeViewer}>
-          <div className="preview-modal-content" onClick={(e) => e.stopPropagation()}>
-            <div className="preview-modal-head">
-              <strong>{channel.title}</strong>
-              <div className="preview-modal-actions">
-                <button className="btn-check" onClick={() => setViewerMode('snapshot')}>Captura</button>
-                <button className="btn-check" onClick={() => setViewerMode('video')}>Clip</button>
-                <button className="btn-check" onClick={closeViewer}>Tancar</button>
-              </div>
-            </div>
-            <div className="preview-modal-body">
-              {viewerMode === 'video' ? (
-                <video
-                  ref={modalVideoRef}
-                  className="preview-modal-media"
-                  src={clipSrc}
-                  controls
-                  playsInline
-                  preload="metadata"
-                  autoPlay
-                  onEnded={handleModalVideoEnd}
-                  onError={handleModalVideoEnd}
-                />
-              ) : (
-                <img className="preview-modal-media" src={snapshotSrc} alt={`Captura gran de ${channel.title}`} />
-              )}
-            </div>
-          </div>
-        </div>
-      )}
+      {viewerModal}
     </div>
   )
 }
