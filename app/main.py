@@ -16,6 +16,8 @@ from pydantic import BaseModel, Field
 
 ENGINE_BASE_URL = os.getenv("ACESTREAM_ENGINE_URL", "http://127.0.0.1:6878").rstrip("/")
 CONNECT_TIMEOUT_SECONDS = float(os.getenv("ACESTREAM_CONNECT_TIMEOUT_SECONDS", "14"))
+CONNECT_RETRIES = int(os.getenv("ACESTREAM_CONNECT_RETRIES", "3"))
+CONNECT_RETRY_DELAY_SECONDS = float(os.getenv("ACESTREAM_CONNECT_RETRY_DELAY_SECONDS", "2"))
 DIRECT_RESOLVE_TIMEOUT_SECONDS = float(os.getenv("ACESTREAM_DIRECT_RESOLVE_TIMEOUT_SECONDS", "9"))
 STREAM_READ_TIMEOUT_SECONDS = float(os.getenv("ACESTREAM_STREAM_READ_TIMEOUT_SECONDS", "20"))
 CLIP_CAPTURE_TIMEOUT_SECONDS = float(os.getenv("ACESTREAM_CLIP_CAPTURE_TIMEOUT_SECONDS", "24"))
@@ -111,32 +113,49 @@ class EngineClient:
             "pid": player_id,
         }
         url = f"{self._base_url}/ace/manifest.m3u8"
-        started = time.perf_counter()
-        timeout = httpx.Timeout(self._timeout_seconds)
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        retries = max(1, CONNECT_RETRIES)
+        last_error: EngineError | None = None
+
+        for attempt in range(retries):
+            started = time.perf_counter()
+            timeout = httpx.Timeout(self._timeout_seconds)
             try:
-                response = await client.get(url, params=params)
+                async with httpx.AsyncClient(timeout=timeout) as client:
+                    response = await client.get(url, params=params)
+
+                elapsed_ms = int((time.perf_counter() - started) * 1000)
+                payload = self._parse_json(response.text)
+                if response.status_code >= 400:
+                    detail = payload.get("error") or response.text.strip() or f"HTTP {response.status_code}"
+                    raise EngineError(detail)
+
+                error = payload.get("error")
+                if error:
+                    raise EngineError(str(error))
+
+                response_data = payload.get("response") or {}
+                playback_url = response_data.get("playback_url")
+                command_url = response_data.get("command_url")
+                if not playback_url:
+                    playback_url = f"{self._base_url}/ace/manifest.m3u8?id={content_hash}"
+                return playback_url, command_url, elapsed_ms
             except httpx.TimeoutException as exc:
-                raise EngineError("Connection to Ace Stream engine timed out") from exc
+                last_error = EngineError("Connection to Ace Stream engine timed out")
             except httpx.HTTPError as exc:
-                raise EngineError(f"Unable to contact Ace Stream engine: {exc}") from exc
+                last_error = EngineError(f"Unable to contact Ace Stream engine: {exc}")
+            except EngineError as exc:
+                last_error = exc
 
-        elapsed_ms = int((time.perf_counter() - started) * 1000)
-        payload = self._parse_json(response.text)
-        if response.status_code >= 400:
-            detail = payload.get("error") or response.text.strip() or f"HTTP {response.status_code}"
-            raise EngineError(detail)
+            if attempt < retries - 1 and last_error is not None:
+                err_text = str(last_error).lower()
+                # These errors are often transient while the source warms up in Ace Stream.
+                if "failed to load content" in err_text or "timed out" in err_text:
+                    await asyncio.sleep(CONNECT_RETRY_DELAY_SECONDS)
+                    continue
 
-        error = payload.get("error")
-        if error:
-            raise EngineError(str(error))
+            break
 
-        response_data = payload.get("response") or {}
-        playback_url = response_data.get("playback_url")
-        command_url = response_data.get("command_url")
-        if not playback_url:
-            playback_url = f"{self._base_url}/ace/manifest.m3u8?id={content_hash}"
-        return playback_url, command_url, elapsed_ms
+        raise last_error or EngineError("Unable to connect to Ace Stream engine")
 
     async def stop_session(self, command_url: str | None) -> None:
         if not command_url:

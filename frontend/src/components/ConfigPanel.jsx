@@ -43,6 +43,12 @@ const FIELD_META = [
     type: 'int',
     help: 'Durada objectiu de cada fragment TS del stream.',
   },
+  {
+    key: 'stream_switch_buffer_seconds',
+    label: 'Buffer al canviar canal (s)',
+    type: 'int',
+    help: 'Segons mínims de vídeo al client abans d\'iniciar la reproducció després d\'un canvi de canal.',
+  },
 ]
 
 export default function ConfigPanel({ settings, onSave, onReset, onRefresh }) {

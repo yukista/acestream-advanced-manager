@@ -168,8 +168,8 @@ export default function App() {
       })
 
       es.addEventListener('stream_changed', (e) => {
-        const { channel_id } = JSON.parse(e.data)
-        setStream({ active: true, channel_id })
+        const { channel_id, started_at } = JSON.parse(e.data)
+        setStream({ active: true, channel_id, started_at })
         setTab('live')
       })
 
@@ -254,10 +254,11 @@ export default function App() {
       const err = await res.json().catch(() => ({}))
       setError(err.detail ?? 'Error desant canal')
       setTimeout(() => setError(null), 4000)
-      return
+      return false
     }
     await fetchAllChannels()
     await fetchStream()
+    return true
   }
 
   const handleDeleteChannel = async (channelId) => {
@@ -307,7 +308,10 @@ export default function App() {
   // ── Derived ───────────────────────────────────────────────────────────────
   const activeChannelId = stream?.channel_id ?? null
   const activeChannel = activeChannelId ? channelMap[activeChannelId] : null
-  const streamSrc = stream?.active ? `${API}/stream/playlist.m3u8` : null
+  const streamVersion = stream?.started_at ?? stream?.channel_id ?? '0'
+  const streamSrc = stream?.active
+    ? `${API}/stream/playlist.m3u8?v=${encodeURIComponent(streamVersion)}`
+    : null
 
   return (
     <div className="app">
@@ -378,6 +382,7 @@ export default function App() {
               <StreamPlayer
                 src={streamSrc}
                 channelName={activeChannel?.title}
+                initialBufferSeconds={settings?.values?.stream_switch_buffer_seconds ?? 20}
                 onStop={handleStopStream}
               />
               {!stream && channels.length > 0 && (

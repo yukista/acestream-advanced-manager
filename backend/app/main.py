@@ -5,6 +5,7 @@ import copy
 import json
 import os
 import re
+import tempfile
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -42,6 +43,7 @@ CHECKS_ENABLED_DEFAULT = os.getenv("CHECKS_ENABLED", "true").lower() in {"1", "t
 CHECKER_INSTANCES_DEFAULT = int(os.getenv("CHECKER_INSTANCES", "1"))
 MAX_SEGMENTS_DEFAULT = int(os.getenv("MAX_SEGMENTS", "30"))
 HLS_SEGMENT_TIME_DEFAULT = int(os.getenv("HLS_SEGMENT_TIME", "6"))
+STREAM_SWITCH_BUFFER_SECONDS_DEFAULT = int(os.getenv("STREAM_SWITCH_BUFFER_SECONDS", "20"))
 FFMPEG_BIN = os.getenv("FFMPEG_BIN", "ffmpeg")
 
 SEGMENTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -96,6 +98,8 @@ checker_rr_lock = asyncio.Lock()
 
 # ── SSE broadcasting ──────────────────────────────────────────────────────────
 _sse_queues: list[asyncio.Queue[str]] = []
+snapshot_cache: dict[int, dict[str, Any]] = {}
+SNAPSHOT_CACHE_TTL_SECONDS = 30
 
 SETTING_SCHEMA: dict[str, dict[str, Any]] = {
     "checks_enabled": {"type": "bool", "default": CHECKS_ENABLED_DEFAULT},
@@ -110,6 +114,7 @@ SETTING_SCHEMA: dict[str, dict[str, Any]] = {
     "health_channel_gap_seconds": {"type": "int", "default": HEALTH_CHANNEL_GAP_SECONDS_DEFAULT, "min": 0, "max": 60},
     "max_segments": {"type": "int", "default": MAX_SEGMENTS_DEFAULT, "min": 5, "max": 300},
     "hls_segment_time": {"type": "int", "default": HLS_SEGMENT_TIME_DEFAULT, "min": 1, "max": 20},
+    "stream_switch_buffer_seconds": {"type": "int", "default": STREAM_SWITCH_BUFFER_SECONDS_DEFAULT, "min": 0, "max": 120},
 }
 
 runtime_settings: dict[str, Any] = {
@@ -297,6 +302,53 @@ async def broadcast(event: str, data: Any) -> None:
             pass
 
 
+async def _extract_snapshot_from_video(video_data: bytes) -> bytes:
+    """Extract a single-frame JPEG snapshot from a video clip."""
+    tmp_in_path: str | None = None
+    tmp_out_path: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp_in:
+            tmp_in.write(video_data)
+            tmp_in_path = tmp_in.name
+
+        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp_out:
+            tmp_out_path = tmp_out.name
+
+        cmd = [
+            FFMPEG_BIN,
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            tmp_in_path,
+            "-frames:v",
+            "1",
+            "-q:v",
+            "3",
+            tmp_out_path,
+        ]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        await asyncio.wait_for(proc.wait(), timeout=10)
+        if proc.returncode != 0:
+            stderr = await proc.stderr.read() if proc.stderr else b""
+            raise RuntimeError(stderr.decode("utf-8", errors="ignore") or f"ffmpeg exit {proc.returncode}")
+
+        return Path(tmp_out_path).read_bytes()
+    finally:
+        for p in (tmp_in_path, tmp_out_path):
+            if not p:
+                continue
+            try:
+                Path(p).unlink()
+            except OSError:
+                pass
+
+
 # ── Ace Stream helpers ────────────────────────────────────────────────────────
 async def ace_open_session(content_hash: str, player_id: str) -> tuple[str, str | None]:
     params = {
@@ -338,6 +390,30 @@ def _clear_segments() -> None:
             pass
 
 
+async def _wait_for_playlist_ready(
+    ffmpeg_process: asyncio.subprocess.Process,
+    timeout_seconds: float = 15.0,
+) -> None:
+    playlist_path = SEGMENTS_DIR / "stream.m3u8"
+    deadline = time.monotonic() + timeout_seconds
+
+    while time.monotonic() < deadline:
+        if ffmpeg_process.returncode is not None:
+            raise RuntimeError("FFmpeg stopped before playlist was ready")
+
+        if playlist_path.exists():
+            try:
+                content = playlist_path.read_text()
+            except OSError:
+                content = ""
+            if "#EXTM3U" in content and ".ts" in content:
+                return
+
+        await asyncio.sleep(0.2)
+
+    raise RuntimeError("Timed out waiting for HLS playlist")
+
+
 async def _start_ffmpeg(playback_url: str) -> asyncio.subprocess.Process:
     _clear_segments()
     hls_segment_time = int(runtime_settings.get("hls_segment_time", HLS_SEGMENT_TIME_DEFAULT))
@@ -353,7 +429,8 @@ async def _start_ffmpeg(playback_url: str) -> asyncio.subprocess.Process:
         "-f", "hls",
         "-hls_time", str(hls_segment_time),
         "-hls_list_size", str(max_segments),
-        "-hls_flags", "delete_segments+append_list+independent_segments",
+        "-hls_start_number_source", "epoch",
+        "-hls_flags", "delete_segments+independent_segments+temp_file",
         "-hls_segment_filename", str(SEGMENTS_DIR / "stream%05d.ts"),
         str(SEGMENTS_DIR / "stream.m3u8"),
     ]
@@ -387,7 +464,7 @@ async def switch_stream(channel_id: int, content_hash: str) -> None:
         player_id = uuid.uuid4().hex
         playback_url, command_url = await ace_open_session(content_hash, player_id)
         proc = await _start_ffmpeg(playback_url)
-        active_stream = ActiveStream(
+        next_stream = ActiveStream(
             channel_id=channel_id,
             content_hash=content_hash,
             player_id=player_id,
@@ -395,7 +472,30 @@ async def switch_stream(channel_id: int, content_hash: str) -> None:
             ffmpeg_process=proc,
         )
 
-    await broadcast("stream_changed", {"channel_id": channel_id})
+        try:
+            await _wait_for_playlist_ready(proc)
+            active_stream = next_stream
+        except Exception:
+            try:
+                proc.terminate()
+                await asyncio.wait_for(proc.wait(), timeout=3)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+            await ace_stop_session(command_url)
+            _clear_segments()
+            active_stream = None
+            raise
+
+    await broadcast(
+        "stream_changed",
+        {
+            "channel_id": channel_id,
+            "started_at": active_stream.started_at if active_stream else None,
+        },
+    )
 
 
 # ── Health check helpers ──────────────────────────────────────────────────────
@@ -650,6 +750,7 @@ class SettingsUpdate(BaseModel):
     health_channel_gap_seconds: int | None = None
     max_segments: int | None = None
     hls_segment_time: int | None = None
+    stream_switch_buffer_seconds: int | None = None
 
 
 def _ch_dict(ch: ChannelModel) -> dict:
@@ -741,6 +842,69 @@ async def get_channel_clip(channel_id: int):
         content=resp.content,
         media_type=content_type,
         headers={"Cache-Control": "public, max-age=15"},
+    )
+
+
+@app.get("/channels/{channel_id}/snapshot")
+async def get_channel_snapshot(channel_id: int):
+    with Session(db_engine) as session:
+        ch = session.get(ChannelModel, channel_id)
+        if not ch:
+            raise HTTPException(404, "Channel not found")
+        clip_url = ch.clip_url
+        if not clip_url and ch.clip_id:
+            clip_url = f"{_active_checker_urls()[0]}/clips/{ch.clip_id}"
+        clip_updated_at = ch.last_checked or ch.updated_at or 0
+
+    if not clip_url:
+        raise HTTPException(404, "No clip available")
+
+    now_ts = _now_ts()
+    cached = snapshot_cache.get(channel_id)
+    if (
+        cached
+        and cached.get("clip_url") == clip_url
+        and cached.get("clip_updated_at") == clip_updated_at
+        and now_ts - int(cached.get("created_at", 0)) <= SNAPSHOT_CACHE_TTL_SECONDS
+    ):
+        return Response(
+            content=cached["content"],
+            media_type=cached.get("media_type", "image/jpeg"),
+            headers={"Cache-Control": "public, max-age=10"},
+        )
+
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            resp = await client.get(clip_url)
+    except Exception as exc:
+        raise HTTPException(502, f"Snapshot fetch failed: {exc}") from exc
+
+    if resp.status_code != 200:
+        raise HTTPException(resp.status_code, "Snapshot unavailable")
+
+    content_type = (resp.headers.get("content-type") or "").lower()
+    if content_type.startswith("image/"):
+        snapshot_bytes = resp.content
+        snapshot_type = content_type.split(";")[0] or "image/jpeg"
+    else:
+        try:
+            snapshot_bytes = await _extract_snapshot_from_video(resp.content)
+            snapshot_type = "image/jpeg"
+        except Exception as exc:
+            raise HTTPException(502, f"Snapshot extraction failed: {exc}") from exc
+
+    snapshot_cache[channel_id] = {
+        "clip_url": clip_url,
+        "clip_updated_at": clip_updated_at,
+        "created_at": now_ts,
+        "content": snapshot_bytes,
+        "media_type": snapshot_type,
+    }
+
+    return Response(
+        content=snapshot_bytes,
+        media_type=snapshot_type,
+        headers={"Cache-Control": "public, max-age=10"},
     )
 
 
@@ -932,6 +1096,12 @@ async def stop_active_stream():
 async def get_playlist():
     playlist_path = SEGMENTS_DIR / "stream.m3u8"
     if not playlist_path.exists():
+        if active_stream and active_stream.ffmpeg_process:
+            try:
+                await _wait_for_playlist_ready(active_stream.ffmpeg_process, timeout_seconds=2.0)
+            except Exception:
+                pass
+    if not playlist_path.exists():
         raise HTTPException(404, "No active stream — start a stream first")
     content = playlist_path.read_text()
     # Segment files are relative; hls.js resolves them relative to this endpoint.
@@ -939,7 +1109,11 @@ async def get_playlist():
     return Response(
         content=content,
         media_type="application/vnd.apple.mpegurl",
-        headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
     )
 
 
@@ -953,7 +1127,11 @@ async def get_segment(filename: str):
     return Response(
         content=seg_path.read_bytes(),
         media_type="video/mp2t",
-        headers={"Cache-Control": "public, max-age=30"},
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
     )
 
 
