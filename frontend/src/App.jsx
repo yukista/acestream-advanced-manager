@@ -353,6 +353,8 @@ export default function App() {
   const streamSrc = stream?.active
     ? `${API}/stream/playlist.m3u8?v=${encodeURIComponent(streamVersion)}`
     : null
+  const cycleActive = checkStatus?.cycles?.active
+  const cycleInactive = checkStatus?.cycles?.inactive
 
   return (
     <div className="app">
@@ -481,13 +483,21 @@ export default function App() {
                       </span>
                     </div>
                     <div className="check-kpi">
-                      <span className="kpi-label">Cicle</span>
-                      <span className="kpi-value">#{checkStatus.cycle_id ?? 0}</span>
+                      <span className="kpi-label">Cicle A/I</span>
+                      <span className="kpi-value">
+                        #{cycleActive?.cycle_id ?? 0} / #{cycleInactive?.cycle_id ?? 0}
+                      </span>
                     </div>
                     <div className="check-kpi">
                       <span className="kpi-label">Progrés</span>
                       <span className="kpi-value">
                         {(checkStatus.checked_in_cycle ?? 0)}/{(checkStatus.total_channels_in_cycle ?? 0)}
+                      </span>
+                    </div>
+                    <div className="check-kpi">
+                      <span className="kpi-label">Progrés actius/inactius</span>
+                      <span className="kpi-value">
+                        {(checkStatus.active_channels_in_cycle ?? 0)}/{(checkStatus.inactive_channels_in_cycle ?? 0)}
                       </span>
                     </div>
                     <div className="check-kpi">
@@ -501,6 +511,12 @@ export default function App() {
                       </span>
                     </div>
                     <div className="check-kpi">
+                      <span className="kpi-label">Comprovadors A/I</span>
+                      <span className="kpi-value">
+                        {(checkStatus.active_channel_checker_instances ?? 0)}/{(checkStatus.inactive_channel_checker_instances ?? 0)}
+                      </span>
+                    </div>
+                    <div className="check-kpi">
                       <span className="kpi-label">Inici cicle</span>
                       <span className="kpi-value">{formatTs(checkStatus.last_cycle_started)}</span>
                     </div>
@@ -511,16 +527,30 @@ export default function App() {
                   </div>
 
                   <div className="checks-current">
-                    <strong>Canal en comprovació:</strong>{' '}
-                    {checkStatus.current_channel_title
-                      ? `${checkStatus.current_channel_title} (id ${checkStatus.current_channel_id})`
-                      : 'cap'}
-                    {checkStatus.current_checker_url ? (
-                      <>
-                        {' · '}
-                        <strong>Comprovador:</strong> {checkStatus.current_checker_name ?? checkerLabel(checkStatus)}
-                      </>
-                    ) : null}
+                    <div>
+                      <strong>Actius:</strong>{' '}
+                      {cycleActive?.current_channel_title
+                        ? `${cycleActive.current_channel_title} (id ${cycleActive.current_channel_id})`
+                        : 'cap'}
+                      {cycleActive?.current_checker_url ? (
+                        <>
+                          {' · '}
+                          <strong>Comprovador:</strong> {cycleActive.current_checker_name ?? checkerLabel(cycleActive)}
+                        </>
+                      ) : null}
+                    </div>
+                    <div>
+                      <strong>Inactius:</strong>{' '}
+                      {cycleInactive?.current_channel_title
+                        ? `${cycleInactive.current_channel_title} (id ${cycleInactive.current_channel_id})`
+                        : 'cap'}
+                      {cycleInactive?.current_checker_url ? (
+                        <>
+                          {' · '}
+                          <strong>Comprovador:</strong> {cycleInactive.current_checker_name ?? checkerLabel(cycleInactive)}
+                        </>
+                      ) : null}
+                    </div>
                   </div>
 
                   <div className="checks-workers">
@@ -533,6 +563,9 @@ export default function App() {
                             <span className={`checker-state ${w.busy ? 'busy' : 'idle'}`}>
                               {w.enabled ? (w.busy ? 'Treballant' : 'Lliure') : 'Desactivat'}
                             </span>
+                          </div>
+                          <div className="checker-meta">
+                            {w.pool === 'active' ? 'Pool: canals actius' : w.pool === 'inactive' ? 'Pool: canals inactius' : 'Pool: desactivat'}
                           </div>
                           <div className="checker-meta">
                             {w.busy

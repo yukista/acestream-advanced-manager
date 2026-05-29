@@ -40,9 +40,22 @@ function HashCell({ hash }) {
 export default function ChannelManager({ channels, onSave, onDelete }) {
   const [drafts, setDrafts] = useState({})
   const [savingIds, setSavingIds] = useState({})
+  const [enabledFilter, setEnabledFilter] = useState('all')
+  const [statusFilter, setStatusFilter] = useState('all')
   const titleSaveTimers = useRef({})
 
-  const rows = useMemo(() => channels.slice().sort((a, b) => a.id - b.id), [channels])
+  const rows = useMemo(() => {
+    return channels
+      .filter((ch) => {
+        if (enabledFilter === 'active' && !ch.enabled) return false
+        if (enabledFilter === 'inactive' && ch.enabled) return false
+
+        const normalizedStatus = ch.status === 'ok' || ch.status === 'error' ? ch.status : 'unknown'
+        if (statusFilter !== 'all' && normalizedStatus !== statusFilter) return false
+        return true
+      })
+      .sort((a, b) => a.id - b.id)
+  }, [channels, enabledFilter, statusFilter])
 
   const getDraft = (ch) => drafts[ch.id] ?? { title: ch.title, enabled: !!ch.enabled }
 
@@ -98,6 +111,36 @@ export default function ChannelManager({ channels, onSave, onDelete }) {
   return (
     <div className="manager-wrap">
       <div className="section-title">Gestió de canals</div>
+      <div className="manager-filters">
+        <label>
+          <span>Actiu</span>
+          <select
+            className="manager-filter-select"
+            value={enabledFilter}
+            onChange={(e) => setEnabledFilter(e.target.value)}
+          >
+            <option value="all">Tots</option>
+            <option value="active">Actius</option>
+            <option value="inactive">Inactius</option>
+          </select>
+        </label>
+        <label>
+          <span>Estat</span>
+          <select
+            className="manager-filter-select"
+            value={statusFilter}
+            onChange={(e) => setStatusFilter(e.target.value)}
+          >
+            <option value="all">Tots</option>
+            <option value="ok">OK</option>
+            <option value="error">Error</option>
+            <option value="unknown">Sense dades</option>
+          </select>
+        </label>
+        <span className="manager-filter-count">
+          {rows.length} de {channels.length}
+        </span>
+      </div>
       {rows.length === 0 ? (
         <div className="empty-state">
           <span className="icon">🗂️</span>
@@ -110,12 +153,14 @@ export default function ChannelManager({ channels, onSave, onDelete }) {
             <span>Canal</span>
             <span>Hash</span>
             <span>Actiu</span>
+            <span>Estat</span>
             <span>Darrera comprovació</span>
             <span>Accions</span>
           </div>
           {rows.map((ch) => {
             const d = getDraft(ch)
             const busy = !!savingIds[ch.id]
+            const normalizedStatus = ch.status === 'ok' || ch.status === 'error' ? ch.status : 'unknown'
             return (
               <div className="manager-row" key={ch.id}>
                 <span className="manager-id">
@@ -154,6 +199,9 @@ export default function ChannelManager({ channels, onSave, onDelete }) {
                   />
                   <span>{d.enabled ? 'Sí' : 'No'}</span>
                 </label>
+                <span className={`status-badge ${normalizedStatus}`}>
+                  {normalizedStatus === 'ok' ? 'OK' : normalizedStatus === 'error' ? 'ERROR' : 'SENSE DADES'}
+                </span>
                 <span className="manager-time">{formatTs(ch.last_checked)}</span>
                 <div className="manager-actions">
                   <button className="stop-btn" disabled={busy} onClick={() => handleDelete(ch)}>

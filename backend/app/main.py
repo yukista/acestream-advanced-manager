@@ -41,6 +41,8 @@ HEALTH_PROBE_TIMEOUT_SECONDS_DEFAULT = int(os.getenv("HEALTH_PROBE_TIMEOUT_SECON
 HEALTH_CHANNEL_GAP_SECONDS_DEFAULT = int(os.getenv("HEALTH_CHANNEL_GAP_SECONDS", "2"))
 CHECKS_ENABLED_DEFAULT = os.getenv("CHECKS_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
 CHECKER_INSTANCES_DEFAULT = int(os.getenv("CHECKER_INSTANCES", "1"))
+CHECKER_INSTANCES_ACTIVE_DEFAULT = int(os.getenv("CHECKER_INSTANCES_ACTIVE", str(CHECKER_INSTANCES_DEFAULT)))
+CHECKER_INSTANCES_INACTIVE_DEFAULT = int(os.getenv("CHECKER_INSTANCES_INACTIVE", "0"))
 MAX_SEGMENTS_DEFAULT = int(os.getenv("MAX_SEGMENTS", "30"))
 HLS_SEGMENT_TIME_DEFAULT = int(os.getenv("HLS_SEGMENT_TIME", "6"))
 STREAM_SWITCH_BUFFER_SECONDS_DEFAULT = int(os.getenv("STREAM_SWITCH_BUFFER_SECONDS", "20"))
@@ -93,8 +95,9 @@ class ActiveStream:
 
 active_stream: ActiveStream | None = None
 active_stream_lock = asyncio.Lock()
-checker_rr_index = 0
+checker_rr_indices: dict[str, int] = {"default": 0, "active": 0, "inactive": 0}
 checker_rr_lock = asyncio.Lock()
+health_status_lock = asyncio.Lock()
 
 # ── SSE broadcasting ──────────────────────────────────────────────────────────
 _sse_queues: list[asyncio.Queue[str]] = []
@@ -103,11 +106,17 @@ SNAPSHOT_CACHE_TTL_SECONDS = 30
 
 SETTING_SCHEMA: dict[str, dict[str, Any]] = {
     "checks_enabled": {"type": "bool", "default": CHECKS_ENABLED_DEFAULT},
-    "checker_instances": {
+    "checker_instances_active": {
         "type": "int",
-        "default": max(1, min(CHECKER_INSTANCES_DEFAULT, len(HEALTH_CHECKER_URLS))),
-        "min": 1,
-        "max": max(1, len(HEALTH_CHECKER_URLS)),
+        "default": max(0, min(CHECKER_INSTANCES_ACTIVE_DEFAULT, len(HEALTH_CHECKER_URLS))),
+        "min": 0,
+        "max": max(0, len(HEALTH_CHECKER_URLS)),
+    },
+    "checker_instances_inactive": {
+        "type": "int",
+        "default": max(0, min(CHECKER_INSTANCES_INACTIVE_DEFAULT, len(HEALTH_CHECKER_URLS))),
+        "min": 0,
+        "max": max(0, len(HEALTH_CHECKER_URLS)),
     },
     "health_check_interval": {"type": "int", "default": HEALTH_CHECK_INTERVAL_DEFAULT, "min": 10, "max": 3600},
     "health_probe_timeout_seconds": {"type": "int", "default": HEALTH_PROBE_TIMEOUT_SECONDS_DEFAULT, "min": 5, "max": 300},
@@ -127,6 +136,8 @@ health_check_status: dict[str, Any] = {
     "checks_enabled": CHECKS_ENABLED_DEFAULT,
     "interval_seconds": HEALTH_CHECK_INTERVAL_DEFAULT,
     "active_checker_instances": 1,
+    "active_channel_checker_instances": 1,
+    "inactive_channel_checker_instances": 0,
     "available_checker_instances": len(HEALTH_CHECKER_URLS),
     "last_cycle_started": None,
     "last_cycle_finished": None,
@@ -137,8 +148,38 @@ health_check_status: dict[str, Any] = {
     "checker_workers": {},
     "checked_in_cycle": 0,
     "total_channels_in_cycle": 0,
+    "active_channels_in_cycle": 0,
+    "inactive_channels_in_cycle": 0,
     "last_result": None,
     "recent_results": [],
+}
+health_check_status["cycles"] = {
+    "active": {
+        "pool": "active",
+        "running": False,
+        "cycle_id": 0,
+        "last_cycle_started": None,
+        "last_cycle_finished": None,
+        "current_channel_id": None,
+        "current_channel_title": None,
+        "current_checker_url": None,
+        "current_checker_name": None,
+        "checked_in_cycle": 0,
+        "total_channels_in_cycle": 0,
+    },
+    "inactive": {
+        "pool": "inactive",
+        "running": False,
+        "cycle_id": 0,
+        "last_cycle_started": None,
+        "last_cycle_finished": None,
+        "current_channel_id": None,
+        "current_channel_title": None,
+        "current_checker_url": None,
+        "current_checker_name": None,
+        "checked_in_cycle": 0,
+        "total_channels_in_cycle": 0,
+    },
 }
 
 
@@ -194,47 +235,113 @@ def _checker_name_from_url(url: str) -> str:
         return url
 
 
-def _active_checker_urls() -> list[str]:
-    configured = int(runtime_settings.get("checker_instances", 1))
-    count = max(1, min(configured, len(HEALTH_CHECKER_URLS)))
-    return HEALTH_CHECKER_URLS[:count]
+def _checker_url_pools() -> tuple[list[str], list[str]]:
+    configured_active = int(runtime_settings.get("checker_instances_active", CHECKER_INSTANCES_ACTIVE_DEFAULT))
+    configured_inactive = int(runtime_settings.get("checker_instances_inactive", CHECKER_INSTANCES_INACTIVE_DEFAULT))
+    active_count = max(0, min(configured_active, len(HEALTH_CHECKER_URLS)))
+    remaining = max(0, len(HEALTH_CHECKER_URLS) - active_count)
+    inactive_count = max(0, min(configured_inactive, remaining))
+    active_urls = HEALTH_CHECKER_URLS[:active_count]
+    inactive_urls = HEALTH_CHECKER_URLS[active_count : active_count + inactive_count]
+    return active_urls, inactive_urls
 
 
-async def _pick_checker_url(urls: list[str] | None = None) -> str:
-    global checker_rr_index
-    active_urls = urls or _active_checker_urls()
+def _default_probe_checker_urls() -> list[str]:
+    active_urls, inactive_urls = _checker_url_pools()
+    if active_urls:
+        return active_urls
+    if inactive_urls:
+        return inactive_urls
+    return []
+
+
+async def _pick_checker_url(urls: list[str] | None = None, pool_key: str = "default") -> str:
+    active_urls = urls or _default_probe_checker_urls()
+    if not active_urls:
+        raise RuntimeError("No checker instances are configured for this channel group")
     async with checker_rr_lock:
-        url = active_urls[checker_rr_index % len(active_urls)]
-        checker_rr_index = (checker_rr_index + 1) % max(1, len(active_urls))
+        idx = checker_rr_indices.get(pool_key, 0)
+        url = active_urls[idx % len(active_urls)]
+        checker_rr_indices[pool_key] = (idx + 1) % max(1, len(active_urls))
         return url
 
 
-def _refresh_health_status_from_settings(active_urls: list[str] | None = None) -> None:
+def _refresh_health_status_from_settings(
+    active_urls: list[str] | None = None,
+    inactive_urls: list[str] | None = None,
+) -> None:
     health_check_status["checks_enabled"] = bool(runtime_settings.get("checks_enabled", CHECKS_ENABLED_DEFAULT))
     health_check_status["interval_seconds"] = int(runtime_settings.get("health_check_interval", HEALTH_CHECK_INTERVAL_DEFAULT))
-    urls = active_urls or _active_checker_urls()
-    health_check_status["active_checker_instances"] = len(urls)
+    cycle_active_urls, cycle_inactive_urls = (active_urls, inactive_urls)
+    if cycle_active_urls is None or cycle_inactive_urls is None:
+        cycle_active_urls, cycle_inactive_urls = _checker_url_pools()
+    health_check_status["active_channel_checker_instances"] = len(cycle_active_urls)
+    health_check_status["inactive_channel_checker_instances"] = len(cycle_inactive_urls)
+    health_check_status["active_checker_instances"] = len(cycle_active_urls) + len(cycle_inactive_urls)
     health_check_status["available_checker_instances"] = len(HEALTH_CHECKER_URLS)
 
 
-def _refresh_checker_workers_status(active_urls: list[str] | None = None) -> None:
-    active_set = set(active_urls or _active_checker_urls())
+def _refresh_health_summary_from_cycles() -> None:
+    cycles = health_check_status.get("cycles", {})
+    active_cycle = cycles.get("active", {})
+    inactive_cycle = cycles.get("inactive", {})
+
+    health_check_status["running"] = bool(active_cycle.get("running") or inactive_cycle.get("running"))
+    health_check_status["cycle_id"] = int(active_cycle.get("cycle_id", 0)) + int(inactive_cycle.get("cycle_id", 0))
+    health_check_status["checked_in_cycle"] = int(active_cycle.get("checked_in_cycle", 0)) + int(inactive_cycle.get("checked_in_cycle", 0))
+    health_check_status["total_channels_in_cycle"] = int(active_cycle.get("total_channels_in_cycle", 0)) + int(inactive_cycle.get("total_channels_in_cycle", 0))
+    health_check_status["active_channels_in_cycle"] = int(active_cycle.get("total_channels_in_cycle", 0))
+    health_check_status["inactive_channels_in_cycle"] = int(inactive_cycle.get("total_channels_in_cycle", 0))
+
+    selected_cycle = active_cycle if active_cycle.get("running") else inactive_cycle
+    health_check_status["current_channel_id"] = selected_cycle.get("current_channel_id")
+    health_check_status["current_channel_title"] = selected_cycle.get("current_channel_title")
+    health_check_status["current_checker_url"] = selected_cycle.get("current_checker_url")
+    health_check_status["current_checker_name"] = selected_cycle.get("current_checker_name")
+
+    started_candidates = [ts for ts in (active_cycle.get("last_cycle_started"), inactive_cycle.get("last_cycle_started")) if ts]
+    finished_candidates = [ts for ts in (active_cycle.get("last_cycle_finished"), inactive_cycle.get("last_cycle_finished")) if ts]
+    health_check_status["last_cycle_started"] = max(started_candidates) if started_candidates else None
+    health_check_status["last_cycle_finished"] = max(finished_candidates) if finished_candidates else None
+
+
+def _refresh_checker_workers_status(
+    active_urls: list[str] | None = None,
+    inactive_urls: list[str] | None = None,
+) -> None:
+    cycle_active_urls, cycle_inactive_urls = (active_urls, inactive_urls)
+    if cycle_active_urls is None or cycle_inactive_urls is None:
+        cycle_active_urls, cycle_inactive_urls = _checker_url_pools()
+    active_set = set(cycle_active_urls)
+    inactive_set = set(cycle_inactive_urls)
     workers: dict[str, Any] = {}
     for url in HEALTH_CHECKER_URLS:
         previous = health_check_status.get("checker_workers", {}).get(url, {})
+        worker_pool = "active" if url in active_set else ("inactive" if url in inactive_set else None)
         workers[url] = {
             "checker_url": url,
             "checker_name": _checker_name_from_url(url),
-            "enabled": url in active_set,
-            "busy": bool(previous.get("busy", False)) if url in active_set else False,
-            "current_channel_id": previous.get("current_channel_id") if url in active_set else None,
-            "current_channel_title": previous.get("current_channel_title") if url in active_set else None,
+            "pool": worker_pool,
+            "enabled": worker_pool is not None,
+            "busy": bool(previous.get("busy", False)) if worker_pool is not None else False,
+            "current_channel_id": previous.get("current_channel_id") if worker_pool is not None else None,
+            "current_channel_title": previous.get("current_channel_title") if worker_pool is not None else None,
             "last_started": previous.get("last_started"),
             "last_finished": previous.get("last_finished"),
             "busy_since": previous.get("busy_since"),
             "last_result": previous.get("last_result"),
         }
     health_check_status["checker_workers"] = workers
+
+
+def _apply_checker_distribution_constraints() -> None:
+    available = len(HEALTH_CHECKER_URLS)
+    active_value = int(runtime_settings.get("checker_instances_active", CHECKER_INSTANCES_ACTIVE_DEFAULT))
+    inactive_value = int(runtime_settings.get("checker_instances_inactive", CHECKER_INSTANCES_INACTIVE_DEFAULT))
+    active_value = max(0, min(active_value, available))
+    inactive_value = max(0, min(inactive_value, max(0, available - active_value)))
+    runtime_settings["checker_instances_active"] = active_value
+    runtime_settings["checker_instances_inactive"] = inactive_value
 
 
 def _load_runtime_settings_from_db() -> None:
@@ -258,6 +365,12 @@ def _load_runtime_settings_from_db() -> None:
                     runtime_settings[key] = meta["default"]
                     row.value = _setting_to_db_value(key, meta["default"])
                     row.updated_at = _now_ts()
+        _apply_checker_distribution_constraints()
+        for key in ("checker_instances_active", "checker_instances_inactive"):
+            row = session.get(AppSettingModel, key)
+            if row is not None:
+                row.value = _setting_to_db_value(key, runtime_settings[key])
+                row.updated_at = _now_ts()
         session.commit()
 
 
@@ -502,7 +615,7 @@ async def switch_stream(channel_id: int, content_hash: str) -> None:
 async def _probe_channel(channel_id: int, content_hash: str, checker_url: str | None = None) -> dict[str, Any]:
     checked_at = _now_ts()
     probe_timeout = int(runtime_settings.get("health_probe_timeout_seconds", HEALTH_PROBE_TIMEOUT_SECONDS_DEFAULT))
-    selected_checker_url = checker_url or await _pick_checker_url()
+    selected_checker_url = checker_url or await _pick_checker_url(pool_key="default")
     try:
         async with httpx.AsyncClient(timeout=probe_timeout) as client:
             resp = await client.post(
@@ -577,117 +690,157 @@ async def _probe_channel(channel_id: int, content_hash: str, checker_url: str | 
     return result
 
 
-async def _health_check_loop() -> None:
+async def _health_check_pool_loop(pool_key: str) -> None:
+    if pool_key not in {"active", "inactive"}:
+        raise RuntimeError(f"Unknown pool key: {pool_key}")
+
     # Initial delay so startup completes first
     await asyncio.sleep(10)
     while True:
         checks_enabled = bool(runtime_settings.get("checks_enabled", True))
         interval_seconds = int(runtime_settings.get("health_check_interval", HEALTH_CHECK_INTERVAL_DEFAULT))
         gap_seconds = int(runtime_settings.get("health_channel_gap_seconds", HEALTH_CHANNEL_GAP_SECONDS_DEFAULT))
-        cycle_checker_urls = _active_checker_urls()
-        _refresh_health_status_from_settings(cycle_checker_urls)
-        _refresh_checker_workers_status(cycle_checker_urls)
+        cycle_active_checker_urls, cycle_inactive_checker_urls = _checker_url_pools()
+        checker_urls = cycle_active_checker_urls if pool_key == "active" else cycle_inactive_checker_urls
+
+        async with health_status_lock:
+            _refresh_health_status_from_settings(cycle_active_checker_urls, cycle_inactive_checker_urls)
+            _refresh_checker_workers_status(cycle_active_checker_urls, cycle_inactive_checker_urls)
+            cycle = health_check_status["cycles"][pool_key]
+
+            if not checks_enabled:
+                cycle["running"] = False
+                cycle["current_channel_id"] = None
+                cycle["current_channel_title"] = None
+                cycle["current_checker_url"] = None
+                cycle["current_checker_name"] = None
+                _refresh_health_summary_from_cycles()
+                await _broadcast_health_status()
+            elif not checker_urls:
+                cycle["running"] = False
+                cycle["checked_in_cycle"] = 0
+                cycle["total_channels_in_cycle"] = 0
+                cycle["current_channel_id"] = None
+                cycle["current_channel_title"] = None
+                cycle["current_checker_url"] = None
+                cycle["current_checker_name"] = None
+                _refresh_health_summary_from_cycles()
+                await _broadcast_health_status()
 
         if not checks_enabled:
-            health_check_status["running"] = False
-            health_check_status["current_channel_id"] = None
-            health_check_status["current_channel_title"] = None
-            health_check_status["current_checker_url"] = None
-            health_check_status["current_checker_name"] = None
-            await _broadcast_health_status()
             await asyncio.sleep(2)
+            continue
+
+        if not checker_urls:
+            await asyncio.sleep(interval_seconds)
             continue
 
         try:
             with Session(db_engine) as session:
-                channels = session.execute(
-                    sa.select(ChannelModel)
-                    .where(ChannelModel.enabled.is_(True))
-                    .order_by(ChannelModel.id)
-                ).scalars().all()
+                query = sa.select(ChannelModel).order_by(ChannelModel.id)
+                if pool_key == "active":
+                    query = query.where(ChannelModel.enabled.is_(True))
+                else:
+                    query = query.where(ChannelModel.enabled.is_(False))
+                channels = session.execute(query).scalars().all()
                 rows = [(ch.id, ch.hash, ch.title) for ch in channels]
 
-            health_check_status["running"] = True
-            health_check_status["cycle_id"] += 1
-            health_check_status["last_cycle_started"] = _now_ts()
-            health_check_status["last_cycle_finished"] = None
-            health_check_status["checked_in_cycle"] = 0
-            health_check_status["total_channels_in_cycle"] = len(rows)
-            health_check_status["current_channel_id"] = None
-            health_check_status["current_channel_title"] = None
-            health_check_status["current_checker_url"] = None
-            health_check_status["current_checker_name"] = None
-            await _broadcast_health_status()
+            async with health_status_lock:
+                cycle = health_check_status["cycles"][pool_key]
+                cycle["running"] = True
+                cycle["cycle_id"] = int(cycle.get("cycle_id", 0)) + 1
+                cycle["last_cycle_started"] = _now_ts()
+                cycle["last_cycle_finished"] = None
+                cycle["checked_in_cycle"] = 0
+                cycle["total_channels_in_cycle"] = len(rows)
+                cycle["current_channel_id"] = None
+                cycle["current_channel_title"] = None
+                cycle["current_checker_url"] = None
+                cycle["current_checker_name"] = None
+                _refresh_health_summary_from_cycles()
+                await _broadcast_health_status()
 
-            worker_count = len(cycle_checker_urls)
             progress_lock = asyncio.Lock()
-            sem = asyncio.Semaphore(worker_count)
+            sem = asyncio.Semaphore(len(checker_urls))
 
             async def run_one(ch_id: int, ch_hash: str, ch_title: str) -> None:
                 async with sem:
-                    checker_url = await _pick_checker_url(cycle_checker_urls)
+                    checker_url = await _pick_checker_url(checker_urls, pool_key=pool_key)
 
                     async with progress_lock:
-                        health_check_status["current_channel_id"] = ch_id
-                        health_check_status["current_channel_title"] = ch_title
-                        health_check_status["current_checker_url"] = checker_url
-                        health_check_status["current_checker_name"] = _checker_name_from_url(checker_url)
-                        worker = health_check_status["checker_workers"].get(checker_url)
-                        if worker is not None:
-                            worker["busy"] = True
-                            worker["current_channel_id"] = ch_id
-                            worker["current_channel_title"] = ch_title
-                            worker["last_started"] = _now_ts()
-                            worker["busy_since"] = _now_ts()
-                    await _broadcast_health_status()
+                        async with health_status_lock:
+                            cycle = health_check_status["cycles"][pool_key]
+                            cycle["current_channel_id"] = ch_id
+                            cycle["current_channel_title"] = ch_title
+                            cycle["current_checker_url"] = checker_url
+                            cycle["current_checker_name"] = _checker_name_from_url(checker_url)
+                            worker = health_check_status["checker_workers"].get(checker_url)
+                            if worker is not None:
+                                worker["busy"] = True
+                                worker["current_channel_id"] = ch_id
+                                worker["current_channel_title"] = ch_title
+                                worker["last_started"] = _now_ts()
+                                worker["busy_since"] = _now_ts()
+                            _refresh_health_summary_from_cycles()
+                        await _broadcast_health_status()
 
                     result = await _probe_channel(ch_id, ch_hash, checker_url)
                     result["channel_title"] = ch_title
+                    result["channel_pool"] = pool_key
 
                     async with progress_lock:
-                        health_check_status["checked_in_cycle"] += 1
-                        health_check_status["last_result"] = result
-                        health_check_status["recent_results"].insert(0, result)
-                        health_check_status["recent_results"] = health_check_status["recent_results"][:30]
-                        worker = health_check_status["checker_workers"].get(checker_url)
-                        if worker is not None:
-                            worker["busy"] = False
-                            worker["current_channel_id"] = None
-                            worker["current_channel_title"] = None
-                            worker["last_finished"] = _now_ts()
-                            worker["busy_since"] = None
-                            worker["last_result"] = {
-                                "channel_id": result.get("channel_id"),
-                                "channel_title": result.get("channel_title"),
-                                "status": result.get("status"),
-                                "checked_at": result.get("checked_at"),
-                                "error_message": result.get("error_message"),
-                            }
-                    await _broadcast_health_status()
+                        async with health_status_lock:
+                            cycle = health_check_status["cycles"][pool_key]
+                            cycle["checked_in_cycle"] = int(cycle.get("checked_in_cycle", 0)) + 1
+                            health_check_status["last_result"] = result
+                            health_check_status["recent_results"].insert(0, result)
+                            health_check_status["recent_results"] = health_check_status["recent_results"][:30]
+                            worker = health_check_status["checker_workers"].get(checker_url)
+                            if worker is not None:
+                                worker["busy"] = False
+                                worker["current_channel_id"] = None
+                                worker["current_channel_title"] = None
+                                worker["last_finished"] = _now_ts()
+                                worker["busy_since"] = None
+                                worker["last_result"] = {
+                                    "channel_id": result.get("channel_id"),
+                                    "channel_title": result.get("channel_title"),
+                                    "status": result.get("status"),
+                                    "checked_at": result.get("checked_at"),
+                                    "error_message": result.get("error_message"),
+                                }
+                            _refresh_health_summary_from_cycles()
+                        await _broadcast_health_status()
 
                     if gap_seconds > 0:
                         await asyncio.sleep(gap_seconds)
 
             await asyncio.gather(*(run_one(ch_id, ch_hash, ch_title) for ch_id, ch_hash, ch_title in rows))
         except Exception as exc:
-            health_check_status["last_result"] = {
-                "channel_id": None,
-                "channel_title": "internal",
-                "status": "error",
-                "checked_at": _now_ts(),
-                "error_message": f"health loop error: {exc}",
-            }
-            health_check_status["recent_results"].insert(0, health_check_status["last_result"])
-            health_check_status["recent_results"] = health_check_status["recent_results"][:30]
-            await _broadcast_health_status()
+            async with health_status_lock:
+                health_check_status["last_result"] = {
+                    "channel_id": None,
+                    "channel_title": "internal",
+                    "status": "error",
+                    "checked_at": _now_ts(),
+                    "error_message": f"health {pool_key} loop error: {exc}",
+                    "channel_pool": pool_key,
+                }
+                health_check_status["recent_results"].insert(0, health_check_status["last_result"])
+                health_check_status["recent_results"] = health_check_status["recent_results"][:30]
+                _refresh_health_summary_from_cycles()
+                await _broadcast_health_status()
         finally:
-            health_check_status["running"] = False
-            health_check_status["current_channel_id"] = None
-            health_check_status["current_channel_title"] = None
-            health_check_status["current_checker_url"] = None
-            health_check_status["current_checker_name"] = None
-            health_check_status["last_cycle_finished"] = _now_ts()
-            await _broadcast_health_status()
+            async with health_status_lock:
+                cycle = health_check_status["cycles"][pool_key]
+                cycle["running"] = False
+                cycle["current_channel_id"] = None
+                cycle["current_channel_title"] = None
+                cycle["current_checker_url"] = None
+                cycle["current_checker_name"] = None
+                cycle["last_cycle_finished"] = _now_ts()
+                _refresh_health_summary_from_cycles()
+                await _broadcast_health_status()
 
         await asyncio.sleep(interval_seconds)
 
@@ -706,13 +859,16 @@ async def lifespan(app: FastAPI):
     Base.metadata.create_all(db_engine)
     _run_schema_migrations()
     _load_runtime_settings_from_db()
-    startup_urls = _active_checker_urls()
-    _refresh_health_status_from_settings(startup_urls)
-    _refresh_checker_workers_status(startup_urls)
+    startup_active_urls, startup_inactive_urls = _checker_url_pools()
+    _refresh_health_status_from_settings(startup_active_urls, startup_inactive_urls)
+    _refresh_checker_workers_status(startup_active_urls, startup_inactive_urls)
+    _refresh_health_summary_from_cycles()
 
-    bg_task = asyncio.create_task(_health_check_loop())
+    bg_task_active = asyncio.create_task(_health_check_pool_loop("active"))
+    bg_task_inactive = asyncio.create_task(_health_check_pool_loop("inactive"))
     yield
-    bg_task.cancel()
+    bg_task_active.cancel()
+    bg_task_inactive.cancel()
 
     # Cleanup active stream on shutdown
     if active_stream:
@@ -744,7 +900,8 @@ class ChannelUpdate(BaseModel):
 
 class SettingsUpdate(BaseModel):
     checks_enabled: bool | None = None
-    checker_instances: int | None = None
+    checker_instances_active: int | None = None
+    checker_instances_inactive: int | None = None
     health_check_interval: int | None = None
     health_probe_timeout_seconds: int | None = None
     health_channel_gap_seconds: int | None = None
@@ -823,7 +980,8 @@ async def get_channel_clip(channel_id: int):
             raise HTTPException(404, "Channel not found")
         clip_url = ch.clip_url
         if not clip_url and ch.clip_id:
-            clip_url = f"{_active_checker_urls()[0]}/clips/{ch.clip_id}"
+            checker_urls = _default_probe_checker_urls()
+            clip_url = f"{checker_urls[0]}/clips/{ch.clip_id}" if checker_urls else None
 
     if not clip_url:
         raise HTTPException(404, "No clip available")
@@ -853,7 +1011,8 @@ async def get_channel_snapshot(channel_id: int):
             raise HTTPException(404, "Channel not found")
         clip_url = ch.clip_url
         if not clip_url and ch.clip_id:
-            clip_url = f"{_active_checker_urls()[0]}/clips/{ch.clip_id}"
+            checker_urls = _default_probe_checker_urls()
+            clip_url = f"{checker_urls[0]}/clips/{ch.clip_id}" if checker_urls else None
         clip_updated_at = ch.last_checked or ch.updated_at or 0
 
     if not clip_url:
@@ -975,9 +1134,23 @@ async def update_settings(payload: SettingsUpdate):
     if unknown:
         raise HTTPException(400, f"Unknown setting(s): {', '.join(unknown)}")
 
+    coerced_values: dict[str, Any] = {}
+    for key, raw_value in data.items():
+        coerced_values[key] = _coerce_setting_value(key, raw_value)
+
+    next_active = int(coerced_values.get("checker_instances_active", runtime_settings.get("checker_instances_active", 0)))
+    next_inactive = int(coerced_values.get("checker_instances_inactive", runtime_settings.get("checker_instances_inactive", 0)))
+    if next_active + next_inactive > len(HEALTH_CHECKER_URLS):
+        raise HTTPException(
+            400,
+            (
+                "checker_instances_active + checker_instances_inactive must be <= "
+                f"{len(HEALTH_CHECKER_URLS)}"
+            ),
+        )
+
     with Session(db_engine) as session:
-        for key, raw_value in data.items():
-            value = _coerce_setting_value(key, raw_value)
+        for key, value in coerced_values.items():
             runtime_settings[key] = value
 
             row = session.get(AppSettingModel, key)
@@ -988,19 +1161,32 @@ async def update_settings(payload: SettingsUpdate):
                 row.value = _setting_to_db_value(key, value)
                 row.updated_at = _now_ts()
 
+        _apply_checker_distribution_constraints()
+        for key in ("checker_instances_active", "checker_instances_inactive"):
+            row = session.get(AppSettingModel, key)
+            if row is not None:
+                row.value = _setting_to_db_value(key, runtime_settings[key])
+                row.updated_at = _now_ts()
+
         session.commit()
 
     if health_check_status.get("running"):
-        cycle_urls = [
+        cycle_active_urls = [
             url
             for url, worker in health_check_status.get("checker_workers", {}).items()
-            if worker.get("enabled")
+            if worker.get("enabled") and worker.get("pool") == "active"
         ]
-        _refresh_health_status_from_settings(cycle_urls or _active_checker_urls())
+        cycle_inactive_urls = [
+            url
+            for url, worker in health_check_status.get("checker_workers", {}).items()
+            if worker.get("enabled") and worker.get("pool") == "inactive"
+        ]
+        _refresh_health_status_from_settings(cycle_active_urls, cycle_inactive_urls)
+        _refresh_checker_workers_status(cycle_active_urls, cycle_inactive_urls)
     else:
-        new_urls = _active_checker_urls()
-        _refresh_health_status_from_settings(new_urls)
-        _refresh_checker_workers_status(new_urls)
+        new_active_urls, new_inactive_urls = _checker_url_pools()
+        _refresh_health_status_from_settings(new_active_urls, new_inactive_urls)
+        _refresh_checker_workers_status(new_active_urls, new_inactive_urls)
     await broadcast("settings_updated", _settings_snapshot())
     await _broadcast_health_status()
     return _settings_snapshot()
@@ -1019,19 +1205,33 @@ async def reset_settings():
             else:
                 row.value = _setting_to_db_value(key, value)
                 row.updated_at = _now_ts()
+
+        _apply_checker_distribution_constraints()
+        for key in ("checker_instances_active", "checker_instances_inactive"):
+            row = session.get(AppSettingModel, key)
+            if row is not None:
+                row.value = _setting_to_db_value(key, runtime_settings[key])
+                row.updated_at = _now_ts()
+
         session.commit()
 
     if health_check_status.get("running"):
-        cycle_urls = [
+        cycle_active_urls = [
             url
             for url, worker in health_check_status.get("checker_workers", {}).items()
-            if worker.get("enabled")
+            if worker.get("enabled") and worker.get("pool") == "active"
         ]
-        _refresh_health_status_from_settings(cycle_urls or _active_checker_urls())
+        cycle_inactive_urls = [
+            url
+            for url, worker in health_check_status.get("checker_workers", {}).items()
+            if worker.get("enabled") and worker.get("pool") == "inactive"
+        ]
+        _refresh_health_status_from_settings(cycle_active_urls, cycle_inactive_urls)
+        _refresh_checker_workers_status(cycle_active_urls, cycle_inactive_urls)
     else:
-        new_urls = _active_checker_urls()
-        _refresh_health_status_from_settings(new_urls)
-        _refresh_checker_workers_status(new_urls)
+        new_active_urls, new_inactive_urls = _checker_url_pools()
+        _refresh_health_status_from_settings(new_active_urls, new_inactive_urls)
+        _refresh_checker_workers_status(new_active_urls, new_inactive_urls)
     await broadcast("settings_updated", _settings_snapshot())
     await _broadcast_health_status()
     return _settings_snapshot()

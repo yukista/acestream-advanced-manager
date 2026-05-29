@@ -8,10 +8,16 @@ const FIELD_META = [
     help: 'Activa o atura el bucle automàtic de comprovacions.',
   },
   {
-    key: 'checker_instances',
-    label: 'Instàncies de comprovador',
+    key: 'checker_instances_active',
+    label: 'Comprovadors per canals actius',
     type: 'int',
-    help: 'Nombre d\'instàncies de comprovador usades en paral·lel dins de cada cicle.',
+    help: 'Nombre d\'instàncies dedicades als canals actius.',
+  },
+  {
+    key: 'checker_instances_inactive',
+    label: 'Comprovadors per canals inactius',
+    type: 'int',
+    help: 'Nombre d\'instàncies dedicades als canals inactius.',
   },
   {
     key: 'health_check_interval',
